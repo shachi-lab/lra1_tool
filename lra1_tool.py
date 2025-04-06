@@ -27,15 +27,15 @@ import serial    # Requires pySerial: pip install pyserial
 import binascii
 
 # 定数定義
-VERSION         = "1.00"
+VERSION         = "1.01"
 INIT_TIMEOUT    = 0.05     # DFU初期化待ちタイムアウト (50 ms)
 RESP_TIMEOUT    = 1.0      # レスポンス待ちタイムアウト (1000 ms)
-FILE_MIN_SIZE   = 32768    # ファームウェアファイル最小サイズ (32kB)
+FILE_MIN_SIZE   = 4096     # ファームウェアファイル最小サイズ (4kB)
 FILE_MAX_SIZE   = 120000   # ファームウェアファイル最大サイズ (120kB)
 
-UPDATE_ADRS = 0x002000  # アップデート用フラッシュアドレス
-INIT_ADRS   = 0x01fe00  # 初期化用フラッシュアドレス
-INIT_SIZE   = 256 + 256   # 初期化モードで書き込むサイズ
+UPDATE_ADRS = 0x002000     # アップデート用フラッシュアドレス
+INIT_ADRS   = 0x01fe00     # 初期化用フラッシュアドレス
+INIT_SIZE   = 256 + 256    # 初期化モードで書き込むサイズ
 
 # ブートローダー用コマンド等の定数
 BSL_HEADER                     = 0x80
@@ -48,7 +48,7 @@ BSL_CMD_RX_DATA_BLOCK_FAST     = 0x1b
 MAGIC_BYTES = bytes([0x69, 0x32, 0x2d, 0x65, 0x6c, 0x65, 0x20])
 
 class LRA1Tool:
-    def __init__(self, port: str, use_reset: bool, mode: str, filename: str = None):
+    def __init__(self, port: str, use_reset: bool, sw_reset: bool, mode: str, filename: str = None):
         """
         コンストラクタ
           port      : 使用するシリアルポート
@@ -58,6 +58,7 @@ class LRA1Tool:
         """
         self.port = port
         self.use_reset = use_reset
+        self.sw_reset = sw_reset
         self.mode = mode
         self.filename = filename
         # update または verify の場合はアップデート用アドレスを、initの場合は初期化用アドレスを設定
@@ -75,9 +76,18 @@ class LRA1Tool:
     def reset_dtr(ser: serial.Serial):
         """シリアルポートのDTR信号を用いたリセット処理"""
         ser.dtr = False
-        time.sleep(0.1)  # 100ms 待機
+        time.sleep(0.10)  # 100ms 待機
         ser.dtr = True
         time.sleep(0.05)  # 50ms 待機
+
+    @staticmethod
+    def reset_cmd(ser: serial.Serial):
+        """シリアルポートに"RESET"コマンドを送信する"""
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+        ser.send_break(duration=0.001)  # 1ms ブレーク信号を送信
+        ser.write(b"\x03RESET\r\n")
+        time.sleep(0.10)  # 100ms 待機
 
     @staticmethod
     def calc_crc(data: bytes) -> int:
@@ -260,12 +270,12 @@ class LRA1Tool:
             print(f"{self.port} device not open.")
             sys.exit(-1)
         ser.dtr = True  # 初期状態に設定
+        if self.sw_reset:
+            self.reset_cmd(ser)
         if self.use_reset:
             self.reset_dtr(ser)
-        # update/verifyの場合のみ転送処理を実施
-        ret = self.loRa_update(ser) if self.mode in ("update", "verify") else 0
-        if self.use_reset:
-            self.reset_dtr(ser)
+        # 転送処理を実施
+        ret = self.loRa_update(ser)
         ser.close()
         if ret:
             print(f"\nError occurred. ({ret})")
@@ -278,19 +288,16 @@ def parse_arguments():
         usage="%(prog)s [options]",
         description=f"LRA1 Tool\nVersion: {VERSION}"
     )
-    parser.add_argument('-p', '--port', type=str, required=True,
-                        help='Specify the serial port (e.g. com0, /dev/ttyS0)')
-    parser.add_argument('-r', '--reset', action='store_true',
-                        help='Use DTR to reset before transfer')
-    parser.add_argument('-b', '--baud', type=int, default=115200,
-                        help='Specify baud rate (default 115200; value is ignored)')
+    parser.add_argument('-p', '--port', type=str, required=True, help='Specify the serial port (e.g. com0, /dev/ttyS0)')
+    parser.add_argument('-r', '--reset', action='store_true', help='Use DTR to reset before transfer')
+    parser.add_argument('-s', '--swreset', action='store_true', help='Softwere reset before transfer')
+    parser.add_argument('-b', '--baud', type=int, default=115200, help='Specify baud rate (default 115200; value is ignored)')
     # モードオプション（必須ではなく、指定がなければデフォルトで update とする）
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-u', '--update', action='store_true', help='Update LRA1 firmware (default mode)')
     group.add_argument('-v', '--verify', action='store_true', help='Verify LRA1 firmware')
     group.add_argument('-i', '--init', action='store_true', help='Initialize the settings (No file needed)')
-    parser.add_argument('-f', '--file', type=str,
-                        help='Firmware file name (required for update/verify modes)')
+    parser.add_argument('-f', '--file', type=str, help='Firmware file name (required for update/verify modes)')
     
     if len(sys.argv) == 1:
         parser.error("Use --help option to see usage")
@@ -315,7 +322,7 @@ def main():
     else:
         mode = "init"
     # LRA1Toolオブジェクト生成して実行
-    tool = LRA1Tool(port=args.port, use_reset=args.reset, mode=mode, filename=args.file)
+    tool = LRA1Tool(port=args.port, use_reset=args.reset, sw_reset=args.swreset, mode=mode, filename=args.file)
     tool.run()
 
 if __name__ == '__main__':
